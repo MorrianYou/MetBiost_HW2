@@ -16,6 +16,9 @@ options("digits" = 4)
 
 library(GGally)
 library(here)
+library(kableExtra)
+library(knitr)
+library(olsrr)
 library(randomForest)
 library(rattle)					# Fancy tree plot
 library(rpart)
@@ -104,7 +107,7 @@ train1 <- sample(cases, floor(length(cases)*0.7))
 
 # Name the training and validation samples
 d.train <- rbind(updat[train0, ], updat[train1, ])
-d.test <- rbind(updat[-train0, ], updat[-train1, ])
+d.test <- updat[-c(train0, train1), ]
 ```
 
 \newpage 
@@ -134,3 +137,223 @@ fancyRpartPlot(tree.p3, sub = "", palettes = "OrRd")
 \newpage
 
 ## Problem 4.
+
+```{r}
+tree.p3$variable.importance
+```
+
+In the regression tree from problem 3, `age`, `packyears`, and `smkstatus` are the top 3 most important variables contributing to the rate of MSCD. We'd like to predict the rate of MSCD on the basis of `age` and `packyears`, and explore how the association varies across people with different smoking status. Therefore, we can fit the logistic regression to the data with interaction terms: 
+
+```{r logi.p4}
+logi.p4 <- glm(mscd ~ (age + packyears)*smkstatus, data = d.train, family = "binomial")
+```
+
+We partition the predicted rate of MSCD into 10 deciles. Then, we compare the observed rate of MSCD in each decile against the average of the predicted rate in the decile:  
+
+```{r rate.summary}
+d.train.logi <- data.frame(d.train)
+d.train.logi <- d.train.logi %>% 
+  mutate(pred.logit = logi.p4$fitted.values) %>% 
+  mutate(pred.p = exp(pred.logit) / (1 + exp(pred.logit)))
+
+# Partition the predicted rates into deciles
+d.train.logi$pred.bin <- cut(d.train.logi$pred.p, 10, label = FALSE)
+
+# Calculate the observed rate of MSCD in each bin
+obs.rate.summary <- d.train.logi %>% 
+  group_by(pred.bin) %>% 
+  summarise(obs.rate = mean(mscd))
+
+# Calculate the average predicted rate of MSCD in each bin
+pred.rate.summary <- d.train.logi %>% 
+  group_by(pred.bin) %>% 
+  summarise(ave.pred.rate = mean(pred.p))
+
+rate.summary <- left_join(obs.rate.summary, pred.rate.summary, by = "pred.bin")
+```
+
+```{r fig.width=4, fig.height=3, fig.align='center'}
+rate.summary %>% 
+  ggplot(aes(x = ave.pred.rate, y = obs.rate)) + 
+  geom_point() + 
+  geom_abline(slope = 1, intercept = 0, color = "blue") + 
+  
+  scale_x_continuous(limits = c(0, 0.8), breaks = seq(0, 0.7, 0.1), name = "Average of Predicted Rate") + 
+  scale_y_continuous(limits = c(0, 0.8), breaks = seq(0, 0.7, 0.1), name = "Observed Rate") +
+  
+  theme_bw() +
+  theme(panel.border = element_blank(), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),  
+        axis.line = element_line(colour = "black"))
+```
+
+It can be seen from the figure that the average of predicted rates ranges from approximately 0.5 to 0.7, whereas the observed rates of MSCD ranges from approximately 0.1 to 0.7. In 8 out of the 10 deciles, the average of predicted rate is higher than the observed rate. In particular, the average predicted rates at the lower deciles (approximately 0.5) are substantially higher than the observed rates (approximately 0.1). This result suggests this logistic regression predictions are generally inconsistent with the observed rates, and the logistic regression model tends to substantially overestimate the rate of MSCD when the actual rate is low. 
+
+Then, we examine the DFFITS value for each observation in the training data to determine if there's any influential ones:
+
+```{r dffits.value, fig.width=5, fig.height=4, fig.align='center'}
+p <- length(logi.p4$coefficients) - 1; n <- nrow(d.train)
+thresh <- 2*sqrt(p/n)
+
+#plot DFFITS values for each observation
+plot(dffits(logi.p4), type = 'h', ylab = "DFFITS value")
+#add horizontal lines at absolute values for threshold
+abline(h = thresh, lty = 2)
+abline(h = -thresh, lty = 2)
+```
+
+\newpage 
+
+```{r}
+sum(dffits(logi.p4) > thresh)
+```
+
+Based on the DFFITS values, there're a total of `r sum(dffits(logi.p4) > thresh)` influential observations in the training data. After removing these influential observations from the training data, we again compare the observed rates with several bins of predicted rates: 
+
+```{r}
+# Remove influential observations 
+d.train.logi.rm.inf <- data.frame(d.train)
+d.train.logi.rm.inf <- d.train.logi.rm.inf[which(dffits(logi.p4) <= thresh), ]
+
+logi.p4.rm.inf <- glm(mscd ~ (age + packyears)*smkstatus, data = d.train.logi.rm.inf, family = "binomial")
+```
+
+```{r rate.summary.rm.inf, echo=FALSE}
+d.train.logi.rm.inf <- d.train.logi.rm.inf %>% 
+  mutate(pred.logit = logi.p4.rm.inf$fitted.values) %>% 
+  mutate(pred.p = exp(pred.logit) / (1 + exp(pred.logit)))
+
+# Partition the predicted rates into deciles
+d.train.logi.rm.inf$pred.bin <- cut(d.train.logi.rm.inf$pred.p, 10, label = FALSE)
+
+# Calculate the observed rate of MSCD in each bin
+obs.rate.summary.rm.inf <- d.train.logi.rm.inf %>% 
+  group_by(pred.bin) %>% 
+  summarise(obs.rate = mean(mscd))
+
+# Calculate the average predicted rate of MSCD in each bin
+pred.rate.summary.rm.inf <- d.train.logi.rm.inf %>% 
+  group_by(pred.bin) %>% 
+  summarise(ave.pred.rate = mean(pred.p))
+
+rate.summary.rm.inf <- left_join(obs.rate.summary.rm.inf, pred.rate.summary.rm.inf, by = "pred.bin")
+```
+
+```{r fig.width=4, fig.height=3, fig.align='center', echo=FALSE}
+rate.summary.rm.inf %>% 
+  ggplot(aes(x = ave.pred.rate, y = obs.rate)) + 
+  geom_point() + 
+  geom_abline(slope = 1, intercept = 0, color = "blue") + 
+  
+  scale_x_continuous(limits = c(0, 0.8), breaks = seq(0, 0.7, 0.1), name = "Average of Predicted Rate") + 
+  scale_y_continuous(limits = c(0, 0.9), breaks = seq(0, 0.8, 0.1), name = "Observed Rate") +
+  
+  theme_bw() +
+  theme(panel.border = element_blank(), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),  
+        axis.line = element_line(colour = "black"))
+```
+
+## Problem 5.
+
+```{r tune.rf, warning=FALSE, fig.width=5, fig.height=4, fig.align='center', cache=TRUE}
+set.seed(1234)
+
+tune.rf <- tuneRF(x = d.train[, 2:6], y = d.train[, 1],
+                  ntreeTry = 500)
+```
+
+Based on the plot and the reported out-of-bag errors, randomly selecting 4 variables at each split yields the optimal result when there're 500 trees in the forest. 
+
+```{r rf.p5, cache=TRUE, dependson="tune.rf", warning=FALSE}
+set.seed(1234)
+m.opt <- tune.rf[which.min(tune.rf[, 2]), 1]
+rf.p5 <- randomForest(x = d.train[, 2:6], y = d.train[, 1],
+                      mtry = m.opt, ntree = 500, keep.forest = TRUE)
+```
+
+```{r fig.width=5, fig.height=3.5, fig.align='center'}
+varImpPlot(rf.p5)
+```
+
+While the regression tree from Problem 3 suggests `age` is the most important variable contributing to the rate of MSCD, the random forest model indicates `packyears` contributes the most. 
+
+We partition the predicted rate of MSCD into 10 deciles. Then, we compare the observed rate of MSCD in each decile against the average of the predicted rate in the decile:  
+
+```{r rate.summary.rf}
+d.train.rf <- data.frame(d.train)
+d.train.rf$pred.p <- rf.p5$predicted
+
+# Partition the predicted rates into deciles
+d.train.rf$pred.bin <- cut(d.train.rf$pred.p, 10, label = FALSE)
+
+# Calculate the observed rate of MSCD in each bin
+obs.rate.summary.rf <- d.train.rf %>% 
+  group_by(pred.bin) %>% 
+  summarise(obs.rate = mean(mscd))
+
+# Calculate the average predicted rate of MSCD in each bin
+pred.rate.summary.rf <- d.train.rf %>% 
+  group_by(pred.bin) %>% 
+  summarise(ave.pred.rate = mean(pred.p))
+
+rate.summary.rf <- left_join(obs.rate.summary.rf, pred.rate.summary.rf, by = "pred.bin")
+```
+
+```{r fig.width=4, fig.height=3, fig.align='center', echo=FALSE}
+rate.summary.rf %>% 
+  ggplot(aes(x = ave.pred.rate, y = obs.rate)) + 
+  geom_point() + 
+  geom_abline(slope = 1, intercept = 0, color = "blue") + 
+  
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 0.9, 0.1), name = "Average of Predicted Rate") + 
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 0.9, 0.1), name = "Observed Rate") +
+  
+  theme_bw() +
+  theme(panel.border = element_blank(), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),  
+        axis.line = element_line(colour = "black"))
+```
+
+Unlike the rates of MSCD predicted by the logistic regression, the average rates of MSCD predicted by the random forest are aligned ideally with the observed rate along the diagonal line. 
+The figure suggests the predictions made by the random forest model are reasonably consistent with the observed rates of MSCD. 
+
+## Problem 6. 
+
+If the predicted probability of having MSCD exceeds 0.5, we classify the individual as having MSCD. 
+
+```{r}
+obs.mscd <- d.test[, "mscd"]
+```
+
+```{r pred.tree}
+# Prediction via regression tree
+pred.tree.prob <- predict(tree.p3, newdata = d.test)
+pred.tree <- ifelse(pred.tree.prob>=0.5, 1, 0)
+mx.tree <- table(Predicted = pred.tree, Observed = obs.mscd); mx.tree
+```
+
+The regression tree from Problem 3 has sensitivity `r mx.tree[2,2]/sum(mx.tree[, 2])` and specificity `r mx.tree[1,1]/sum(mx.tree[, 1])`. 
+
+\newpage 
+
+```{r pred.logi}
+# Prediction via logistic regression
+pred.logi.prob <- predict(logi.p4, newdata = d.test, type = "response")
+pred.logi <- ifelse(pred.logi.prob>=0.5, 1, 0)
+mx.logi <- table(Predicted = pred.logi, Observed = obs.mscd); mx.logi
+```
+
+The logistic regression from Problem 4 has sensitivity `r mx.logi[2,2]/sum(mx.logi[, 2])` and specificity `r mx.logi[1,1]/sum(mx.logi[, 1])`. 
+
+```{r pred.rf}
+# Prediction via random forest
+pred.rf.prob <- predict(rf.p5, newdata = d.test, type = "response")
+pred.rf <- ifelse(pred.rf.prob>=0.5, 1, 0)
+mx.rf <- table(Predicted = pred.rf, Observed = obs.mscd); mx.rf
+```
+
+The random forest from Problem 4 has sensitivity `r mx.rf[2,2]/sum(mx.rf[, 2])` and specificity `r mx.rf[1,1]/sum(mx.rf[, 1])`. 
