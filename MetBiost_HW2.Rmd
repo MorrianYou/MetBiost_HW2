@@ -1,0 +1,136 @@
+---
+title: "MetBiost_HW2"
+author: "Shengjun You"
+date: "4/23/2022"
+output: 
+  pdf_document:
+    toc: true
+  github_document:
+    toc: true
+---
+
+\newpage
+
+```{r setup, include=FALSE}
+options("digits" = 4)
+
+library(GGally)
+library(here)
+library(randomForest)
+library(rattle)					# Fancy tree plot
+library(rpart)
+library(rpart.plot)				# Enhanced tree plots
+library(RColorBrewer)	
+library(tidyverse)
+```
+
+# Part I: Prediction models for having a major smoking caused disease
+
+## Problem 1.
+
+```{r}
+load(here("data", "nmes.rdata"))
+nmes[nmes == "."] <- NA
+nmes <- mutate(nmes, mscd = ifelse((lc5==1)|(chd5==1), 1, 0))
+```
+
+Create variable **smkstatus** to distinguish people who never smoked, former smokers and current smokers: 
+```{r nmes}
+nmes <- mutate(nmes, smkstatus = case_when(
+  eversmk==0 ~ 0, #0 stands for never smoked
+  (eversmk==1) & (current==0) ~ 1, #1 stands for former smokers
+  (eversmk==1) & (current==1) ~ 2 #2 stands for current smokers
+  ))
+```
+
+Select a subset of features as predictors for statistical prediction models:
+```{r d}
+d <- data.frame(
+  mscd = nmes$mscd,
+  age = nmes$lastage,
+  male = factor(nmes$male),
+  smkstatus = factor(nmes$smkstatus),
+  packyears = as.numeric(nmes$packyears),
+  marital = factor(nmes$marital)
+)
+```
+
+```{r imp.d}
+set.seed(1234)
+
+if(!file.exists(here("data", "imp_d.RData"))){
+  imp.d <- rfImpute(x = d[,2:6], y =d[,1])
+  save(imp.d, file = "imp_d.RData")
+} else{
+  load(here("data", "imp_d.RData"))
+  imp.d <- rename(imp.d, mscd = `d[, 1]`)
+}
+```
+
+```{r}
+summary(imp.d)
+```
+
+```{r}
+table(MSCD = imp.d$mscd, Smoking_Status = imp.d$smkstatus)
+```
+
+Among the `r dim(imp.d)[1]` people in the imputed data set, `r table(imp.d$mscd)["1"]` of them have major smoking-caused disease(MSCD) and `r table(imp.d$mscd)["0"]` of them don't. Among people who don't have MSCD, `r table(MSCD = imp.d$mscd, Smoking_Status = imp.d$smkstatus)[1,1]` of them never smoked, `r table(MSCD = imp.d$mscd, Smoking_Status = imp.d$smkstatus)[1,2]` are former smokers, and `r table(MSCD = imp.d$mscd, Smoking_Status = imp.d$smkstatus)[1,3]` are current smokers. Among people who have MSCD, `r table(MSCD = imp.d$mscd, Smoking_Status = imp.d$smkstatus)[2,1]` of them never smoked, `r table(MSCD = imp.d$mscd, Smoking_Status = imp.d$smkstatus)[2,2]` are former smokers, and `r table(MSCD = imp.d$mscd, Smoking_Status = imp.d$smkstatus)[2,3]` are current smokers. 
+
+\newpage
+
+## Problem 2.
+
+```{r upd}
+set.seed(1234)
+# Create indicators for the cases and controls
+orig0 <- which(d$mscd == 0)
+orig1 <- which(d$mscd == 1)
+
+# Create an upweighted sample of cases
+orig1up <- sample(orig1, ceiling(length(orig1)*2.5), replace = TRUE)
+
+# Create a new upweighted dataset
+updat <- rbind(imp.d[orig0, ], imp.d[orig1up, ])
+```
+
+```{r}
+set.seed(1234)
+# From the new upweighted dataset, create a training and validation sample
+controls <- which(updat$mscd == 0)
+cases <- which(updat$mscd == 1)
+train0 <- sample(controls, floor(length(controls)*0.7))
+train1 <- sample(cases, floor(length(cases)*0.7))
+
+# Name the training and validation samples
+d.train <- rbind(updat[train0, ], updat[train1, ])
+d.test <- rbind(updat[-train0, ], updat[-train1, ])
+```
+
+\newpage 
+
+## Problem 3. 
+
+```{r tree0.p3, fig.width=6, fig.height=4, fig.align='center'}
+set.seed(1234)
+tree0.p3 <- rpart(mscd ~ ., data = d.train, method = "anova", 
+                  control = rpart.control(minsplit = 500, cp = 0.00001))
+plotcp(tree0.p3)
+```
+
+Find the optimal value of `cp` that yields the smallest cross-validation error. Then prune the tree using this optimal `cp` value: 
+
+```{r tree.p3, fig.width=5, fig.height=3, fig.align='center'}
+cp.opt <- tree0.p3$cptable[which.min(tree0.p3$cptable[, "xerror"]), "CP"]
+
+tree.p3 <- rpart(mscd ~ ., data = d.train, method = "anova", 
+                 control = rpart.control(minsplit = 500, cp = cp.opt)); plotcp(tree.p3)
+```
+
+```{r tree.p3.plt, fig.width=12, fig.height=10, fig.align='center'}
+fancyRpartPlot(tree.p3, sub = "", palettes = "OrRd")
+```
+
+\newpage
+
+## Problem 4.
