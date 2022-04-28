@@ -1,6 +1,6 @@
 ---
 title: "MetBiost_HW2"
-author: "Shengjun You"
+author: "Jimmy Lei, Richard Xu, Shengjun You"
 date: "4/23/2022"
 output: 
   pdf_document:
@@ -15,6 +15,7 @@ output:
 options("digits" = 4)
 
 library(GGally)
+library(ggpubr)
 library(here)
 library(kableExtra)
 library(knitr)
@@ -25,6 +26,8 @@ library(rpart)
 library(rpart.plot)				# Enhanced tree plots
 library(RColorBrewer)	
 library(tidyverse)
+library(caret)
+library(MLeval)  # calculate ROC
 ```
 
 # Part I: Prediction models for having a major smoking caused disease
@@ -240,12 +243,13 @@ pred.rate.summary.rm.inf <- d.train.logi.rm.inf %>%
 rate.summary.rm.inf <- left_join(obs.rate.summary.rm.inf, pred.rate.summary.rm.inf, by = "pred.bin")
 ```
 
-```{r fig.width=4, fig.height=3, fig.align='center', echo=FALSE}
-rate.summary.rm.inf %>% 
+```{r rate.summary.rm.inf.plt, fig.width=4, fig.height=3, fig.align='center', echo=FALSE}
+rate.summary.rm.inf.plt <- rate.summary.rm.inf %>% 
   ggplot(aes(x = ave.pred.rate, y = obs.rate)) + 
   geom_point() + 
   geom_abline(slope = 1, intercept = 0, color = "blue") + 
   
+  labs(title = "Logistic Regression") +
   scale_x_continuous(limits = c(0, 0.8), breaks = seq(0, 0.7, 0.1), name = "Average of Predicted Rate") + 
   scale_y_continuous(limits = c(0, 0.9), breaks = seq(0, 0.8, 0.1), name = "Observed Rate") +
   
@@ -253,7 +257,8 @@ rate.summary.rm.inf %>%
   theme(panel.border = element_blank(), 
         panel.grid.major = element_blank(),
         panel.grid.minor = element_blank(),  
-        axis.line = element_line(colour = "black"))
+        axis.line = element_line(colour = "black"),
+        plot.title = element_text(hjust = 0.5)); rate.summary.rm.inf.plt
 ```
 
 ## Problem 5.
@@ -302,12 +307,13 @@ pred.rate.summary.rf <- d.train.rf %>%
 rate.summary.rf <- left_join(obs.rate.summary.rf, pred.rate.summary.rf, by = "pred.bin")
 ```
 
-```{r fig.width=4, fig.height=3, fig.align='center', echo=FALSE}
-rate.summary.rf %>% 
+```{r rate.summary.rf.plt, fig.width=4, fig.height=3, fig.align='center', echo=FALSE}
+rate.summary.rf.plt <- rate.summary.rf %>% 
   ggplot(aes(x = ave.pred.rate, y = obs.rate)) + 
   geom_point() + 
   geom_abline(slope = 1, intercept = 0, color = "blue") + 
   
+  labs(title = "Random Forest") +
   scale_x_continuous(limits = c(0, 1), breaks = seq(0, 0.9, 0.1), name = "Average of Predicted Rate") + 
   scale_y_continuous(limits = c(0, 1), breaks = seq(0, 0.9, 0.1), name = "Observed Rate") +
   
@@ -315,7 +321,8 @@ rate.summary.rf %>%
   theme(panel.border = element_blank(), 
         panel.grid.major = element_blank(),
         panel.grid.minor = element_blank(),  
-        axis.line = element_line(colour = "black"))
+        axis.line = element_line(colour = "black"),
+        plot.title = element_text(hjust = 0.5)); rate.summary.rf.plt
 ```
 
 Unlike the rates of MSCD predicted by the logistic regression, the average rates of MSCD predicted by the random forest are aligned ideally with the observed rate along the diagonal line. 
@@ -356,4 +363,66 @@ pred.rf <- ifelse(pred.rf.prob>=0.5, 1, 0)
 mx.rf <- table(Predicted = pred.rf, Observed = obs.mscd); mx.rf
 ```
 
-The random forest from Problem 4 has sensitivity `r mx.rf[2,2]/sum(mx.rf[, 2])` and specificity `r mx.rf[1,1]/sum(mx.rf[, 1])`. 
+The random forest from Problem 4 has sensitivity `r mx.rf[2,2]/sum(mx.rf[, 2])` and specificity `r mx.rf[1,1]/sum(mx.rf[, 1])`.
+
+## Problem 7.
+
+```{r roc.tree}
+# Cross validated ROC via regression tree
+set.seed(1234)
+imp.d$mscd <- as.factor(imp.d$mscd)
+levels(imp.d$mscd)<-c("no","yes")
+train.control <- trainControl(method="cv", number=10, savePredictions = TRUE,classProbs=TRUE)
+tree.p7 <- train(mscd ~ ., data = imp.d, trControl=train.control, method="rpart")
+
+res.tree.p7 <- evalm(tree.p7, plots='r')
+```
+```{r roc.logi}
+# Cross validated ROC via logistic regression
+set.seed(1234)
+logi.p7 <- train(mscd ~ (age + packyears)*smkstatus, data = imp.d, trControl=train.control, method="glm", family=binomial)
+res.logi.p7 <- evalm(logi.p7, plots='r')
+```
+```{r roc.rf}
+# Cross validated ROC via random forest
+set.seed(1234)
+
+customRF <- list(type = "Classification",
+                 library = "randomForest",
+                 loop = NULL)
+
+customRF$parameters <- data.frame(parameter = c("mtry", "ntree"),
+                                  class = rep("numeric", 2),
+                                  label = c("mtry", "ntree"))
+
+customRF$grid <- function(x, y, len = NULL, search = "grid") {}
+
+customRF$fit <- function(x, y, wts, param, lev, last, weights, classProbs) {
+  randomForest(x, y,
+               mtry = param$mtry,
+               ntree=param$ntree)
+}
+
+#Predict label
+customRF$predict <- function(modelFit, newdata, preProc = NULL, submodels = NULL)
+   predict(modelFit, newdata)
+
+#Predict prob
+customRF$prob <- function(modelFit, newdata, preProc = NULL, submodels = NULL)
+   predict(modelFit, newdata, type = "prob")
+
+customRF$sort <- function(x) x[order(x[,1]),]
+customRF$levels <- function(x) x$classes
+
+tunegrid <- expand.grid(.mtry=4,.ntree=500)
+
+rf.p7 <- train(mscd~., data=imp.d, method=customRF, tuneGrid=tunegrid,trControl=train.control)
+res.rf.p7 <- evalm(rf.p7, plots='r')
+```
+We obtained an AUC of 0.65 for the random forest, 0.68 for the regression tree, and 0.75 for the logistic regression, suggesting that logistic regression provided the best results.
+
+```{r include=FALSE}
+# plots
+ggarrange(rate.summary.rm.inf.plt, rate.summary.rf.plt, labels = c("(a)", "(b)"))
+```
+
